@@ -88,16 +88,22 @@ bool ObstacleTracker::updateParams(std_srvs::Empty::Request &req, std_srvs::Empt
   TrackedObstacle::setCounterSize(static_cast<int>(p_loop_rate_ * p_tracking_duration_));
   TrackedObstacle::setCovariances(p_process_variance_, p_process_rate_variance_, p_measurement_variance_);
 
+  TrackedLeg::setSamplingTime(p_sampling_time_);
+  TrackedLeg::setCounterSize(static_cast<int>(p_loop_rate_ * p_tracking_duration_));
+  TrackedLeg::setCovariances(p_process_variance_, p_process_rate_variance_, p_measurement_variance_);
+
   timer_.setPeriod(ros::Duration(p_sampling_time_), false);
 
   if (p_active_ != prev_active) {
     if (p_active_) {
       obstacles_sub_ = nh_.subscribe("raw_obstacles", 10, &ObstacleTracker::obstaclesCallback, this);
-      obstacles_pub_ = nh_.advertise<Obstacles>("obstacles", 10);
+      leg_array_sub_ = nh_.subscribe("detected_leg_clusters", 10, &ObstacleTracker::legArrayCallback, this);
+      obstacles_pub_ = nh_.advertise<Obstacles>("tracked_obstacles", 10);
+      leg_array_pub_ = nh_.advertise<LegArray>("tracked_legs", 10);
       timer_.start();
     }
     else {
-      // Send empty message
+      // Send empty message to obstacles
       ObstaclesPtr obstacles_msg(new Obstacles);
       obstacles_msg->header.frame_id = obstacles_.header.frame_id;
       obstacles_msg->header.stamp = ros::Time::now();
@@ -109,6 +115,18 @@ bool ObstacleTracker::updateParams(std_srvs::Empty::Request &req, std_srvs::Empt
       tracked_obstacles_.clear();
       untracked_obstacles_.clear();
 
+      // Send empty message to tracked_legs
+      LegArrayPtr leg_array_msg(new LegArray);
+      leg_array_msg->header.frame_id = leg_array_.header.frame_id;
+      leg_array_msg->header.stamp = ros::Time::now();
+      leg_array_pub_.publish(leg_array_msg);
+
+      leg_array_sub_.shutdown();
+      leg_array_pub_.shutdown();
+
+      tracked_leg_array_.clear();
+      untracked_leg_array_.clear();
+
       timer_.stop();
     }
   }
@@ -118,7 +136,9 @@ bool ObstacleTracker::updateParams(std_srvs::Empty::Request &req, std_srvs::Empt
 
 void ObstacleTracker::timerCallback(const ros::TimerEvent&) {
   updateObstacles();
+  updateLegArray();
   publishObstacles();
+  publishLegArray();
 }
 
 void ObstacleTracker::obstaclesCallback(const Obstacles::ConstPtr new_obstacles) {
@@ -143,10 +163,10 @@ void ObstacleTracker::obstaclesCallback(const Obstacles::ConstPtr new_obstacles)
   calculateCostMatrix(new_obstacles->circles, cost_matrix);
 
   vector<int> row_min_indices;
-  calculateRowMinIndices(cost_matrix, row_min_indices);
+  calculateRowMinIndices(cost_matrix, row_min_indices, false);
 
   vector<int> col_min_indices;
-  calculateColMinIndices(cost_matrix, col_min_indices);
+  calculateColMinIndices(cost_matrix, col_min_indices, false);
 
   vector<int> used_old_obstacles;
   vector<int> used_new_obstacles;
@@ -236,6 +256,113 @@ void ObstacleTracker::obstaclesCallback(const Obstacles::ConstPtr new_obstacles)
   untracked_obstacles_.assign(new_untracked_obstacles.begin(), new_untracked_obstacles.end());
 }
 
+void ObstacleTracker::legArrayCallback(const LegArray::ConstPtr new_leg_array) {
+  int N = new_leg_array->legs.size();
+  int T = tracked_leg_array_.size();
+  int U = untracked_leg_array_.size();
+
+  if (T + U == 0) {
+    untracked_leg_array_.assign(new_leg_array->legs.begin(), new_leg_array->legs.end());
+    return;
+  }
+
+  mat cost_matrix;
+  calculateCostMatrix(new_leg_array->legs, cost_matrix);
+
+  vector<int> row_min_indices;
+  calculateRowMinIndices(cost_matrix, row_min_indices, true);
+
+  vector<int> col_min_indices;
+  calculateColMinIndices(cost_matrix, col_min_indices, true);
+
+  vector<int> used_new_leg_array;
+  vector<int> used_old_leg_array;
+
+  vector<TrackedLeg> new_tracked_leg_array;
+  vector<Leg> new_untracked_leg_array;
+
+  // Check for fusion (only tracked leg array)
+  for (int i = 0; i < T-1; ++i) {
+    if (fusionObstacleUsed(i, col_min_indices, used_new_leg_array, used_old_leg_array))
+      continue;
+
+    vector<int> fusion_indices;
+    fusion_indices.push_back(i);
+
+    for (int j = i+1; j < T; ++j) {
+      if (fusionObstaclesCorrespond(i, j, col_min_indices, used_old_leg_array))
+        fusion_indices.push_back(j);
+    }
+
+    if (fusion_indices.size() > 1) {
+      fuseObstacles(fusion_indices, col_min_indices, new_tracked_leg_array, new_leg_array);
+
+      // Mark used old and new leg array
+      used_old_leg_array.insert(used_old_leg_array.end(), fusion_indices.begin(), fusion_indices.end());
+      used_new_leg_array.push_back(col_min_indices[i]);
+    }
+  }
+
+  // Check for fission (only tracked leg array)
+  for (int i = 0; i < N-1; ++i) {
+    if (fissionObstacleUsed(i, T, row_min_indices, used_new_leg_array, used_old_leg_array))
+      continue;
+
+    vector<int> fission_indices;
+    fission_indices.push_back(i);
+
+    for (int j = i+1; j < N; ++j) {
+      if (fissionObstaclesCorrespond(i, j, row_min_indices, used_new_leg_array))
+        fission_indices.push_back(j);
+    }
+
+    if (fission_indices.size() > 1) {
+      fissureObstacle(fission_indices, row_min_indices, new_tracked_leg_array, new_leg_array);
+
+      // Mark used old and new leg array
+      used_old_leg_array.push_back(row_min_indices[i]);
+      used_new_leg_array.insert(used_new_leg_array.end(), fission_indices.begin(), fission_indices.end());
+    }
+  }
+
+  // Check for other possibilities
+  for (int n = 0; n < N; ++n) {
+    if (find(used_new_leg_array.begin(), used_new_leg_array.end(), n) != used_new_leg_array.end())
+      continue;
+
+    if (row_min_indices[n] == -1) {
+      new_untracked_leg_array.push_back(new_leg_array->legs[n]);
+    }
+    else if (find(used_old_leg_array.begin(), used_old_leg_array.end(), row_min_indices[n]) == used_old_leg_array.end()) {
+      if (row_min_indices[n] >= 0 && row_min_indices[n] < T) {
+        tracked_leg_array_[row_min_indices[n]].correctState(new_leg_array->legs[n]);
+      }
+      else if (row_min_indices[n] >= T) {
+        TrackedLeg to(untracked_leg_array_[row_min_indices[n] - T]);
+        to.correctState(new_leg_array->legs[n]);
+        for (int i = 0; i < static_cast<int>(p_loop_rate_ / p_sensor_rate_); ++i)
+          to.updateState();
+
+        new_tracked_leg_array.push_back(to);
+      }
+
+      used_new_leg_array.push_back(n);
+    }
+  }
+
+  // Remove tracked leg array that are no longer existent due to fusion or fission and insert new ones
+  // Sort in descending order to remove from back of the list
+  sort(used_old_leg_array.rbegin(), used_old_leg_array.rend());
+  for (int idx : used_old_leg_array)
+    tracked_leg_array_.erase(tracked_leg_array_.begin() + idx);
+
+  tracked_leg_array_.insert(tracked_leg_array_.end(), new_tracked_leg_array.begin(), new_tracked_leg_array.end());
+
+  // Remove old untracked leg array and save new ones
+  untracked_leg_array_.clear();
+  untracked_leg_array_.assign(new_untracked_leg_array.begin(), new_untracked_leg_array.end());
+}
+
 double ObstacleTracker::obstacleCostFunction(const CircleObstacle& new_obstacle, const CircleObstacle& old_obstacle) {
   mat distribution = mat(2, 2).zeros();
   vec relative_position = vec(2).zeros();
@@ -256,6 +383,36 @@ double ObstacleTracker::obstacleCostFunction(const CircleObstacle& new_obstacle,
   relative_position(1) = new_center.y - old_center.y;
 
   cost = sqrt(pow(new_obstacle.center.x - old_obstacle.center.x, 2.0) + pow(new_obstacle.center.y - old_obstacle.center.y, 2.0) + pow(new_obstacle.radius - old_obstacle.radius, 2.0));
+
+  mat a = -0.5 * trans(relative_position) * distribution * relative_position;
+  penalty = exp(a(0, 0));
+
+  // TODO: Check values for cost/penalty in common situations
+  // return cost / penalty;
+  return cost / 1.0;
+}
+
+// Overload obstacleCostFunction
+double ObstacleTracker::obstacleCostFunction(const Leg& new_leg, const Leg& old_leg) {
+  mat distribution = mat(2, 2).zeros();
+  vec relative_position = vec(2).zeros();
+
+  double cost = 0.0;
+  double penalty = 1.0;
+  double tp = 1.0 / p_sensor_rate_;
+
+  double direction = atan2(old_leg.velocity.y, old_leg.velocity.x);
+
+  geometry_msgs::Point new_position = transformPoint(new_leg.position, 0.0, 0.0, -direction);
+  geometry_msgs::Point old_position = transformPoint(old_leg.position, 0.0, 0.0, -direction);
+
+  distribution(0, 0) = pow(p_std_correspondence_dev_, 2.0) + squaredLength(old_leg.velocity) * pow(tp, 2.0);
+  distribution(1, 1) = pow(p_std_correspondence_dev_, 2.0);
+
+  relative_position(0) = new_position.x - old_position.x - tp * length(old_leg.velocity);
+  relative_position(1) = new_position.y - old_position.y;
+
+  cost = sqrt(pow(new_leg.position.x - old_leg.position.x, 2.0) + pow(new_leg.position.y - old_leg.position.y, 2.0));
 
   mat a = -0.5 * trans(relative_position) * distribution * relative_position;
   penalty = exp(a(0, 0));
@@ -287,15 +444,46 @@ void ObstacleTracker::calculateCostMatrix(const vector<CircleObstacle>& new_obst
   }
 }
 
-void ObstacleTracker::calculateRowMinIndices(const mat& cost_matrix, vector<int>& row_min_indices) {
+// Overload calculateCostMatrix
+void ObstacleTracker::calculateCostMatrix(const vector<Leg>& new_leg_array, mat& cost_matrix) {
+  /*
+   * Cost between two leg_array represents their difference.
+   * The bigger the cost, the less similar they are.
+   * N rows of cost_matrix represent new leg_array.
+   * T+U columns of cost matrix represent old tracked and untracked leg_array.
+   */
+  int N = new_leg_array.size();
+  int T = tracked_leg_array_.size();
+  int U = untracked_leg_array_.size();
+
+  cost_matrix = mat(N, T + U, fill::zeros);
+
+  for (int n = 0; n < N; ++n) {
+    for (int t = 0; t < T; ++t)
+      cost_matrix(n, t) = obstacleCostFunction(new_leg_array[n], tracked_leg_array_[t].getLeg());
+
+    for (int u = 0; u < U; ++u)
+      cost_matrix(n, u + T) = obstacleCostFunction(new_leg_array[n], untracked_leg_array_[u]);
+  }
+}
+
+void ObstacleTracker::calculateRowMinIndices(const mat& cost_matrix, vector<int>& row_min_indices, bool isLeg) {
   /*
    * Vector of row minimal indices keeps the indices of old obstacles (tracked and untracked)
    * that have the minimum cost related to each of new obstacles, i.e. row_min_indices[n]
    * keeps the index of old obstacle that has the minimum cost with n-th new obstacle.
    */
-  int N = cost_matrix.n_rows;
-  int T = tracked_obstacles_.size();
-  int U = untracked_obstacles_.size();
+  int N,T,U;
+  if (isLeg){
+    N = cost_matrix.n_rows;
+    T = tracked_leg_array_.size();
+    U = untracked_leg_array_.size();
+  }
+  else{
+    N = cost_matrix.n_rows;
+    T = tracked_obstacles_.size();
+    U = untracked_obstacles_.size();
+  }
 
   row_min_indices.assign(N, -1); // Minimum index -1 means no correspondence has been found
 
@@ -318,15 +506,23 @@ void ObstacleTracker::calculateRowMinIndices(const mat& cost_matrix, vector<int>
   }
 }
 
-void ObstacleTracker::calculateColMinIndices(const mat& cost_matrix, vector<int>& col_min_indices) {
+void ObstacleTracker::calculateColMinIndices(const mat& cost_matrix, vector<int>& col_min_indices, bool isLeg) {
   /*
    * Vector of column minimal indices keeps the indices of new obstacles that has the minimum
    * cost related to each of old (tracked and untracked) obstacles, i.e. col_min_indices[i]
    * keeps the index of new obstacle that has the minimum cost with i-th old obstacle.
    */
-  int N = cost_matrix.n_rows;
-  int T = tracked_obstacles_.size();
-  int U = untracked_obstacles_.size();
+  int N,T,U;
+  if (isLeg){
+    N = cost_matrix.n_rows;
+    T = tracked_leg_array_.size();
+    U = untracked_leg_array_.size();
+  }
+  else{
+    N = cost_matrix.n_rows;
+    T = tracked_obstacles_.size();
+    U = untracked_obstacles_.size();
+  }
 
   col_min_indices.assign(T + U, -1); // Minimum index -1 means no correspondence has been found
 
@@ -441,6 +637,41 @@ void ObstacleTracker::fuseObstacles(const vector<int>& fusion_indices, const vec
   new_tracked.push_back(to);
 }
 
+// Overload fuseObstacles
+void ObstacleTracker::fuseObstacles(const vector<int>& fusion_indices, const vector<int> &col_min_indices,
+                                    vector<TrackedLeg>& new_tracked, const LegArray::ConstPtr& new_leg_array) {
+  Leg c;
+
+  double sum_var_x  = 0.0;
+  double sum_var_y  = 0.0;
+  double sum_var_vx = 0.0;
+  double sum_var_vy = 0.0;
+
+  for (int idx : fusion_indices) {
+    c.position.x += tracked_leg_array_[idx].getLeg().position.x / tracked_leg_array_[idx].getKFx().P(0,0);
+    c.position.y += tracked_leg_array_[idx].getLeg().position.y / tracked_leg_array_[idx].getKFy().P(0,0);
+    c.velocity.x += tracked_leg_array_[idx].getLeg().velocity.x / tracked_leg_array_[idx].getKFx().P(1,1);
+    c.velocity.y += tracked_leg_array_[idx].getLeg().velocity.y / tracked_leg_array_[idx].getKFy().P(1,1);
+
+    sum_var_x += 1.0 / tracked_leg_array_[idx].getKFx().P(0,0);
+    sum_var_y += 1.0 / tracked_leg_array_[idx].getKFy().P(0,0);
+    sum_var_vx += 1.0 / tracked_leg_array_[idx].getKFx().P(1,1);
+    sum_var_vy += 1.0 / tracked_leg_array_[idx].getKFy().P(1,1);
+  }
+
+  c.position.x /= sum_var_x;
+  c.position.y /= sum_var_y;
+  c.velocity.x /= sum_var_vx;
+  c.velocity.y /= sum_var_vy;
+
+  TrackedLeg to(c);
+  to.correctState(new_leg_array->legs[col_min_indices[fusion_indices.front()]]);
+  for (int i = 0; i < static_cast<int>(p_loop_rate_ / p_sensor_rate_); ++i)
+    to.updateState();
+
+  new_tracked.push_back(to);
+}
+
 void ObstacleTracker::fissureObstacle(const vector<int>& fission_indices, const vector<int>& row_min_indices,
                                       vector<TrackedObstacle>& new_tracked, const Obstacles::ConstPtr& new_obstacles) {
   // For each new obstacle taking part in fission create a tracked obstacle from the original old one and update it with the new one
@@ -454,12 +685,35 @@ void ObstacleTracker::fissureObstacle(const vector<int>& fission_indices, const 
   }
 }
 
+// Overlaod fissureObstacle
+void ObstacleTracker::fissureObstacle(const vector<int>& fission_indices, const vector<int>& row_min_indices,
+                                      vector<TrackedLeg>& new_tracked, const LegArray::ConstPtr& new_leg_array) {
+  // For each new leg taking part in fission create a tracked leg from the original old one and update it with the new one
+  for (int idx : fission_indices) {
+    TrackedLeg to = tracked_leg_array_[row_min_indices[idx]];
+    to.correctState(new_leg_array->legs[idx]);
+    for (int i = 0; i < static_cast<int>(p_loop_rate_ / p_sensor_rate_); ++i)
+      to.updateState();
+
+    new_tracked.push_back(to);
+  }
+}
+
 void ObstacleTracker::updateObstacles() {
   for (int i = 0; i < tracked_obstacles_.size(); ++i) {
     if (!tracked_obstacles_[i].hasFaded())
       tracked_obstacles_[i].updateState();
     else
       tracked_obstacles_.erase(tracked_obstacles_.begin() + i--);
+  }
+}
+
+void ObstacleTracker::updateLegArray() {
+  for (int i = 0; i < tracked_leg_array_.size(); ++i) {
+    if (!tracked_leg_array_[i].hasFaded())
+      tracked_leg_array_[i].updateState();
+    else
+      tracked_leg_array_.erase(tracked_leg_array_.begin() + i--);
   }
 }
 
@@ -480,9 +734,31 @@ void ObstacleTracker::publishObstacles() {
   obstacles_pub_.publish(obstacles_msg);
 }
 
+void ObstacleTracker::publishLegArray() {
+  LegArrayPtr leg_array_msg(new LegArray);
+
+  leg_array_.legs.clear();
+
+  for (auto& tracked_leg : tracked_leg_array_) {
+    Leg ob = tracked_leg.getLeg();
+    leg_array_.legs.push_back(ob);
+  }
+
+  *leg_array_msg = leg_array_;
+  leg_array_msg->header.stamp = ros::Time::now();
+
+  leg_array_pub_.publish(leg_array_msg);
+}
+
 // Ugly initialization of static members of tracked obstacles...
 int    TrackedObstacle::s_fade_counter_size_     = 0;
 double TrackedObstacle::s_sampling_time_         = 100.0;
 double TrackedObstacle::s_process_variance_      = 0.0;
 double TrackedObstacle::s_process_rate_variance_ = 0.0;
 double TrackedObstacle::s_measurement_variance_  = 0.0;
+
+int    TrackedLeg::s_fade_counter_size_     = 0;
+double TrackedLeg::s_sampling_time_         = 100.0;
+double TrackedLeg::s_process_variance_      = 0.0;
+double TrackedLeg::s_process_rate_variance_ = 0.0;
+double TrackedLeg::s_measurement_variance_  = 0.0;

@@ -41,9 +41,9 @@
 namespace kf_tracker
 {
 
-class TrackedObstacle {
+class TrackedLeg {
 public:
-  TrackedObstacle(const custom_msgs::CircleObstacle& obstacle) : obstacle_(obstacle), kf_x_(0, 1, 2), kf_y_(0, 1, 2), kf_r_(0, 1, 2) {
+  TrackedLeg(const custom_msgs::Leg& leg) : leg_(leg), kf_x_(0, 1, 2), kf_y_(0, 1, 2) {
     fade_counter_ = s_fade_counter_size_;
     initKF();
   }
@@ -51,35 +51,28 @@ public:
   void predictState() {
     kf_x_.predictState();
     kf_y_.predictState();
-    kf_r_.predictState();
 
-    obstacle_.center.x = kf_x_.q_pred(0);
-    obstacle_.center.y = kf_y_.q_pred(0);
+    leg_.position.x = kf_x_.q_pred(0);
+    leg_.position.y = kf_y_.q_pred(0);
 
-    obstacle_.velocity.x = kf_x_.q_pred(1);
-    obstacle_.velocity.y = kf_y_.q_pred(1);
-
-    obstacle_.radius = kf_r_.q_pred(0);
+    leg_.velocity.x = kf_x_.q_pred(1);
+    leg_.velocity.y = kf_y_.q_pred(1);
 
     fade_counter_--;
   }
 
-  void correctState(const custom_msgs::CircleObstacle& new_obstacle) {
-    kf_x_.y(0) = new_obstacle.center.x;
-    kf_y_.y(0) = new_obstacle.center.y;
-    kf_r_.y(0) = new_obstacle.radius;
+  void correctState(const custom_msgs::Leg& new_leg) {
+    kf_x_.y(0) = new_leg.position.x;
+    kf_y_.y(0) = new_leg.position.y;
 
     kf_x_.correctState();
     kf_y_.correctState();
-    kf_r_.correctState();
 
-    obstacle_.center.x = kf_x_.q_est(0);
-    obstacle_.center.y = kf_y_.q_est(0);
+    leg_.position.x = kf_x_.q_est(0);
+    leg_.position.y = kf_y_.q_est(0);
 
-    obstacle_.velocity.x = kf_x_.q_est(1);
-    obstacle_.velocity.y = kf_y_.q_est(1);
-
-    obstacle_.radius = kf_r_.q_est(0);
+    leg_.velocity.x = kf_x_.q_est(1);
+    leg_.velocity.y = kf_y_.q_est(1);
 
     fade_counter_ = s_fade_counter_size_;
   }
@@ -87,19 +80,15 @@ public:
   void updateState() {
     kf_x_.predictState();
     kf_y_.predictState();
-    kf_r_.predictState();
 
     kf_x_.correctState();
     kf_y_.correctState();
-    kf_r_.correctState();
 
-    obstacle_.center.x = kf_x_.q_est(0);
-    obstacle_.center.y = kf_y_.q_est(0);
+    leg_.position.x = kf_x_.q_est(0);
+    leg_.position.y = kf_y_.q_est(0);
 
-    obstacle_.velocity.x = kf_x_.q_est(1);
-    obstacle_.velocity.y = kf_y_.q_est(1);
-
-    obstacle_.radius = kf_r_.q_est(0);
+    leg_.velocity.x = kf_x_.q_est(1);
+    leg_.velocity.y = kf_y_.q_est(1);
 
     fade_counter_--;
   }
@@ -119,53 +108,44 @@ public:
   }
 
   bool hasFaded() const { return ((fade_counter_ <= 0) ? true : false); }
-  const custom_msgs::CircleObstacle& getObstacle() const { return obstacle_; }
+  const custom_msgs::Leg& getLeg() const { return leg_; }
   const KalmanFilter& getKFx() const { return kf_x_; }
   const KalmanFilter& getKFy() const { return kf_y_; }
-  const KalmanFilter& getKFr() const { return kf_r_; }
 
 private:
   void initKF() {
     kf_x_.A(0, 1) = s_sampling_time_;
     kf_y_.A(0, 1) = s_sampling_time_;
-    kf_r_.A(0, 1) = s_sampling_time_;
 
     kf_x_.C(0, 0) = 1.0;
     kf_y_.C(0, 0) = 1.0;
-    kf_r_.C(0, 0) = 1.0;
 
     kf_x_.R(0, 0) = s_measurement_variance_;
     kf_y_.R(0, 0) = s_measurement_variance_;
-    kf_r_.R(0, 0) = s_measurement_variance_;
 
     kf_x_.Q(0, 0) = s_process_variance_;
-    kf_r_.Q(0, 0) = s_process_variance_;
     kf_y_.Q(0, 0) = s_process_variance_;
 
     kf_x_.Q(1, 1) = s_process_rate_variance_;
     kf_y_.Q(1, 1) = s_process_rate_variance_;
-    kf_r_.Q(1, 1) = s_process_rate_variance_;
 
-    kf_x_.q_pred(0) = obstacle_.center.x;
-    kf_r_.q_pred(0) = obstacle_.radius;
-    kf_y_.q_pred(0) = obstacle_.center.y;
+    kf_x_.q_pred(0) = leg_.position.x;
+    kf_y_.q_pred(0) = leg_.position.y;
 
-    kf_x_.q_pred(1) = obstacle_.velocity.x;
-    kf_y_.q_pred(1) = obstacle_.velocity.y;
+    kf_x_.q_pred(1) = leg_.velocity.x;
+    kf_y_.q_pred(1) = leg_.velocity.y;
 
-    kf_x_.q_est(0) = obstacle_.center.x;
-    kf_r_.q_est(0) = obstacle_.radius;
-    kf_y_.q_est(0) = obstacle_.center.y;
+    kf_x_.q_est(0) = leg_.position.x;
+    kf_y_.q_est(0) = leg_.position.y;
 
-    kf_x_.q_est(1) = obstacle_.velocity.x;
-    kf_y_.q_est(1) = obstacle_.velocity.y;
+    kf_x_.q_est(1) = leg_.velocity.x;
+    kf_y_.q_est(1) = leg_.velocity.y;
   }
 
-  custom_msgs::CircleObstacle obstacle_;
+  custom_msgs::Leg leg_;
 
   KalmanFilter kf_x_;
   KalmanFilter kf_y_;
-  KalmanFilter kf_r_;
 
   int fade_counter_;
 

@@ -41,8 +41,10 @@
 #include <armadillo>
 #include <std_srvs/Empty.h>
 #include <custom_msgs/Obstacles.h>
+#include <custom_msgs/LegArray.h>
 
 #include "kf_tracker/utilities/tracked_obstacle.h"
+#include "kf_tracker/utilities/tracked_leg.h"
 #include "kf_tracker/utilities/math_utilities.h"
 
 namespace kf_tracker
@@ -57,13 +59,16 @@ private:
   bool updateParams(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res);
   void timerCallback(const ros::TimerEvent&);
   void obstaclesCallback(const custom_msgs::Obstacles::ConstPtr new_obstacles);
+  void legArrayCallback(const custom_msgs::LegArray::ConstPtr new_leg_array);
 
   void initialize() { std_srvs::Empty empt; updateParams(empt.request, empt.response); }
 
   double obstacleCostFunction(const custom_msgs::CircleObstacle& new_obstacle, const custom_msgs::CircleObstacle& old_obstacle);
+  double obstacleCostFunction(const custom_msgs::Leg& new_leg, const custom_msgs::Leg& old_leg);
   void calculateCostMatrix(const std::vector<custom_msgs::CircleObstacle>& new_obstacles, arma::mat& cost_matrix);
-  void calculateRowMinIndices(const arma::mat& cost_matrix, std::vector<int>& row_min_indices);
-  void calculateColMinIndices(const arma::mat& cost_matrix, std::vector<int>& col_min_indices);
+  void calculateCostMatrix(const std::vector<custom_msgs::Leg>& new_legs, arma::mat& cost_matrix);
+  void calculateRowMinIndices(const arma::mat& cost_matrix, std::vector<int>& row_min_indices, bool isLeg);
+  void calculateColMinIndices(const arma::mat& cost_matrix, std::vector<int>& col_min_indices, bool isLeg);
 
   bool fusionObstacleUsed(const int idx, const std::vector<int>& col_min_indices, const std::vector<int>& used_new, const std::vector<int>& used_old);
   bool fusionObstaclesCorrespond(const int idx, const int jdx, const std::vector<int>& col_min_indices, const std::vector<int>& used_old);
@@ -72,25 +77,36 @@ private:
 
   void fuseObstacles(const std::vector<int>& fusion_indices, const std::vector<int>& col_min_indices,
                      std::vector<TrackedObstacle>& new_tracked, const custom_msgs::Obstacles::ConstPtr& new_obstacles);
+  void fuseObstacles(const std::vector<int>& fusion_indices, const std::vector<int>& col_min_indices,
+                     std::vector<TrackedLeg>& new_tracked, const custom_msgs::LegArray::ConstPtr& new_leg_array);
   void fissureObstacle(const std::vector<int>& fission_indices, const std::vector<int>& row_min_indices,
                        std::vector<TrackedObstacle>& new_tracked, const custom_msgs::Obstacles::ConstPtr& new_obstacles);
+  void fissureObstacle(const std::vector<int>& fission_indices, const std::vector<int>& row_min_indices,
+                       std::vector<TrackedLeg>& new_tracked, const custom_msgs::LegArray::ConstPtr& new_leg_array);
 
   void updateObstacles();
+  void updateLegArray();
   void publishObstacles();
+  void publishLegArray();
 
   ros::NodeHandle nh_;
   ros::NodeHandle nh_local_;
 
   ros::Subscriber obstacles_sub_;
+  ros::Subscriber leg_array_sub_;
   ros::Publisher obstacles_pub_;
+  ros::Publisher leg_array_pub_;
   ros::ServiceServer params_srv_;
   ros::Timer timer_;
 
   double radius_margin_;
   custom_msgs::Obstacles obstacles_;
+  custom_msgs::LegArray leg_array_;
 
   std::vector<TrackedObstacle> tracked_obstacles_;
   std::vector<custom_msgs::CircleObstacle> untracked_obstacles_;
+  std::vector<TrackedLeg> tracked_leg_array_;
+  std::vector<custom_msgs::Leg> untracked_leg_array_;
 
   // Parameters
   bool p_active_;
