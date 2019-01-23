@@ -16,7 +16,7 @@ find_package(Armadillo REQUIRED)
 # Initialise the export variables
 catkin_package(
   INCLUDE_DIRS include
-  LIBRARIES obs_tracker
+  LIBRARIES obs_tracker obs_tracker_node
   CATKIN_DEPENDS roscpp std_msgs custom_msgs std_srvs geometry_msgs
 )
 
@@ -26,9 +26,15 @@ include_directories(
   include
 )
 
+# Library
 add_library(obs_tracker src/obs_tracker.cpp)
 target_link_libraries(obs_tracker ${catkin_LIBRARIES}  ${ARMADILLO_LIBRARIES})
 add_dependencies(obs_tracker ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
+
+# Executable
+add_executable(obs_tracker_node src/obs_tracker_node.cpp)
+target_link_libraries(obs_tracker_node obs_tracker)
+
 
 
 install(DIRECTORY launch
@@ -50,3 +56,8 @@ install(DIRECTORY include/${PROJECT_NAME}/
 #    DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 #)
 
+#
+# Install nodes
+#
+install(TARGETS obs_tracker_node 
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
